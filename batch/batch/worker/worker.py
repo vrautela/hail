@@ -2245,7 +2245,7 @@ class Worker:
             log.exception(f'could not activate after trying for {MAX_IDLE_TIME_MSECS} ms, exiting')
             return
 
-        log.info('awaiting opening of websocket connection')
+        log.info(f'{NAME}: awaiting opening of websocket connection')
         await self.open_websocket_connection()
 
         log.info('setting up app runner')
@@ -2286,14 +2286,14 @@ class Worker:
         log.info('opening websocket connection')
 
         self.ws_connection_manager = self.client_session.ws_connect(
-            deploy_config.url('batch-driver', '/api/v1alpha/worker_wss'),
-            headers={'X-Hail-Instance-Name': NAME, 'Authorization': f'Bearer {os.environ["ACTIVATION_TOKEN"]}'},
+            deploy_config.url('batch-driver', '/api/v1alpha/worker_wss'), headers=self.headers
         )
         aenter = type(self.ws_connection_manager).__aenter__
         self.ws_connection = await aenter(self.ws_connection_manager)
+        log.info('opened websocket connection')
 
     async def close_websocket_connection(self):
-        if self.ws_connection_manager is not None and self.ws_connection is not None:
+        if self.ws_connection_manager is not None:
             log.info('closing websocket connection')
             aexit = type(self.ws_connection_manager).__aexit__
             await aexit(self.ws_connection_manager, None, None, None)
@@ -2308,12 +2308,13 @@ class Worker:
         # infinite loop and the instance won't be deleted.
         ws_json = {'message': 'deactivate'}
         if self.ws_connection is not None:
-            # TODO: use send_json() method to send headers (and request info, in general)
             try:
-                await self.ws_connection.send_json(json.dumps(ws_json))
+                await self.ws_connection.send_json(ws_json)
+                log.info(f'{NAME} websocket sent message deactivate')
                 return
             except:
-                print('websocket failed to send message')
+                log.exception(f'{NAME} websocket failed to send message deactivate')
+                self.ws_connection = None
 
         await self.client_session.post(
             deploy_config.url('batch-driver', '/api/v1alpha/instances/deactivate'), headers=self.headers
@@ -2355,13 +2356,15 @@ class Worker:
         start_time = time_msecs()
         delay_secs = 0.1
 
-        ws_json = {'message': 'job_complete', 'json': body}
+        ws_json = {'message': 'job_complete', 'body': body, 'headers': self.headers}
         if self.ws_connection is not None:
             try:
-                self.ws_connection.send_json(json.dumps(ws_json))
+                await self.ws_connection.send_json(ws_json)
+                log.info(f'{NAME}: websocket sent message job_complete')
                 return
             except:
-                print('websocket failed to send message')
+                log.exception(f'{NAME}: websocket failed to send message job_complete')
+                self.ws_connection = None
 
         while True:
             try:
@@ -2417,13 +2420,15 @@ class Worker:
 
         body = {'status': status}
 
-        ws_json = {'message': 'job_started', 'json': body}
+        ws_json = {'message': 'job_started', 'body': body, 'headers': self.headers}
         if self.ws_connection is not None:
             try:
-                self.ws_connection.send_json(json.dumps(ws_json))
+                await self.ws_connection.send_json(ws_json)
+                log.info(f'{NAME} websocket sent message job_started')
                 return
             except:
-                print('websocket failed to send message')
+                log.exception(f'{NAME} websocket failed to send message job_started')
+                self.ws_connection = None
 
         await request_retry_transient_errors(
             self.client_session,

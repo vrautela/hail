@@ -347,6 +347,47 @@ async def job_complete_1(request, instance):
     return web.Response()
 
 
+async def job_complete_2(request_json, instance, request_app):
+    body = request_json['body']
+    job_status = body['status']
+
+    batch_id = job_status['batch_id']
+    job_id = job_status['job_id']
+    attempt_id = job_status['attempt_id']
+
+    state = job_status['state']
+    if state == 'succeeded':
+        new_state = 'Success'
+    elif state == 'error':
+        new_state = 'Error'
+    else:
+        assert state == 'failed', state
+        new_state = 'Failed'
+
+    start_time = job_status['start_time']
+    end_time = job_status['end_time']
+    status = job_status['status']
+    resources = job_status.get('resources')
+
+    await mark_job_complete(
+        request_app,
+        batch_id,
+        job_id,
+        attempt_id,
+        instance.name,
+        new_state,
+        status,
+        start_time,
+        end_time,
+        'completed',
+        resources,
+    )
+
+    await instance.mark_healthy()
+
+    return web.Response()
+
+
 @routes.post('/api/v1alpha/instances/job_complete')
 @active_instances_only
 async def job_complete(request, instance):
@@ -370,6 +411,23 @@ async def job_started_1(request, instance):
     return web.Response()
 
 
+async def job_started_2(request_json, instance, request_app):
+    body = request_json['body']
+    job_status = body['status']
+
+    batch_id = job_status['batch_id']
+    job_id = job_status['job_id']
+    attempt_id = job_status['attempt_id']
+    start_time = job_status['start_time']
+    resources = job_status.get('resources')
+
+    await mark_job_started(request_app, batch_id, job_id, attempt_id, instance, start_time, resources)
+
+    await instance.mark_healthy()
+
+    return web.Response()
+
+
 @routes.post('/api/v1alpha/instances/job_started')
 @active_instances_only
 async def job_started(request, instance):
@@ -387,22 +445,24 @@ async def create_driver_worker_websocket_connection(request, instance) -> web.We
     async for msg in ws:
         if msg.type == aiohttp.WSMsgType.TEXT:
             # parse message as JSON
-            msg_json = json.loads(msg.data)
-            message = msg_json.message
+            msg_json = msg.json()
+            log.info(f'received json: {msg_json}')
+            message = msg_json['message']
             if message == 'close':
                 await ws.close()
             elif message == 'deactivate':
-                asyncio.run(deactivate_instance_1(instance))
+                await deactivate_instance_1(instance)
             elif message == 'job_complete':
-                asyncio.run(job_complete_1(request, instance))
+                log.info("client running job_complete_2")
+                await job_complete_2(msg_json, instance, request.app)
             elif message == 'job_started':
-                asyncio.run(job_started_1(request, instance))
+                await job_started_2(msg_json, instance, request.app)
             else:
-                print(f"Received unrecognized message: {message}")
+                log.exception(f"Received unrecognized message: {message}")
         elif msg.type == aiohttp.WSMsgType.ERROR:
-            print('ws connection closed with exception %s' % ws.exception())
+            log.exception('ws connection closed with exception %s' % ws.exception())
 
-    print('Batch-driver: websocket connection closed')
+    log.info('Batch-driver: websocket connection closed')
 
     HTTP_ACTIVE_WEBSOCKETS.dec()
     return ws
